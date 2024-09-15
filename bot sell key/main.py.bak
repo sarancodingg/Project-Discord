@@ -1,0 +1,514 @@
+import nextcord, json, re, httpx, certifi, datetime, os
+from nextcord.ext import commands
+from nextcord.ui import Button, View
+bot = commands.Bot(command_prefix='nyx!',help_command=None,intents=nextcord.Intents.all())
+config = json.load(open('config.json', 'r', encoding='utf-8'))
+
+
+
+def count_buyers():
+    with open('./database/users.json', 'r', encoding='utf-8') as file:
+        users = json.load(file)
+    buyers_count = sum(1 for user in users.values() if any("payment" in transaction for transaction in user.get('transaction', [])))
+    return buyers_count
+
+def count_stock_items(file_path):
+    if os.path.exists(file_path):  # ตรวจสอบว่าไฟล์มีอยู่
+        with open(file_path, 'r', encoding='utf-8') as file:
+            return len(file.readlines())
+    else:
+        return "File does not exist."  # หรือคืนค่า error ที่เหมาะสม
+
+class BuyerCountView(nextcord.ui.View):
+    def __init__(self):
+        super().__init__()
+        self.add_item(BuyerCountButton())
+
+class BuyerCountButton(nextcord.ui.Button):
+    def __init__(self):
+        super().__init__(label="เช็คจำนวนผู้ซื้อ", style=nextcord.ButtonStyle.green, custom_id="count_buyers")
+
+    async def callback(self, interaction: nextcord.Interaction):
+        buyer_count = count_buyers()
+        await interaction.response.send_message(f"มีผู้ซื้อไปแล้ว {buyer_count} คน", ephemeral=True)
+
+
+channel_id = 1206973039313420308
+channel = bot.get_channel(channel_id)
+class StockCheckSelect(nextcord.ui.Select):
+    def __init__(self):
+        options = [
+            nextcord.SelectOption(label='เช็คคีย์1วัน', description='เช็คเลย', value='1.txt'),
+            nextcord.SelectOption(label='เช็คคีย์3วัน', description='เช็คเลย', value='3.txt'),
+            nextcord.SelectOption(label='เช็คคีย์7วัน', description='เช็คเลย', value='7.txt'),
+            nextcord.SelectOption(label='เช็คคีย์14วัน', description='เช็คเลย', value='14.txt'),
+            nextcord.SelectOption(label='เช็คคีย์30วัน', description='เช็คเลย', value='30.txt'),
+            # ตามด้วยไฟล์อื่นๆ...
+        ]
+        super().__init__(placeholder='เลือกวันที่ต้องการเช็ค', min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: nextcord.Interaction):
+        # โค้ดเมื่อผู้ใช้เลือกไฟล์สต็อก
+        file_path = self.values[0]
+        stock_count = count_stock_items(file_path)
+        await interaction.response.send_message(f"จำนวนสต็อกใน {file_path}คงเหลือ: {stock_count}คีย์", ephemeral=True)
+
+def get_top_donors():
+    with open('./database/users.json', 'r', encoding='utf-8') as file:
+        users = json.load(file)
+    sorted_users = sorted(users.items(), key=lambda x: x[1]['all-point'], reverse=True)[:3]
+    return sorted_users
+
+class TopDonorsView(nextcord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)  # View does not expire
+
+        # Add a button to view top donors
+        self.add_item(nextcord.ui.Button(label="Check Top Donors", style=nextcord.ButtonStyle.green, custom_id="check_top_donors"))
+
+    # Callback for the button, you must include interaction parameter
+   
+    async def check_top_donors(self, button: nextcord.ui.Button, interaction: nextcord.Interaction):
+        top_donors = get_top_donors()
+        message = "🏆 **Top Donors** 🏆\n"
+        for index, (user_id, data) in enumerate(top_donors, start=1):
+            message += f"**Rank {index}**: <@{user_id}> with {data['all-point']} points\n"
+        await interaction.response.send_message(message, ephemeral=True)
+
+@bot.command()
+async def top_donors_button(ctx):
+    """Command to display a button for checking top donors."""
+    view = TopDonorsView()
+    await ctx.send("Click the button to check the top donors:", view=view)
+
+
+
+
+
+
+
+
+
+class sellroleView(nextcord.ui.View):
+    
+    def __init__(self, roleData: dict, day: str):
+        super().__init__(timeout=None)
+        self.roleData = roleData
+        self.day = day  # เพิ่มบรรทัดนี้เพื่อกำหนดค่า day
+
+    @nextcord.ui.button(label='[🟢] ยีนยัน', custom_id='already', style=nextcord.ButtonStyle.green, row=1)
+    async def already(self, button: nextcord.Button, interaction: nextcord.Interaction):
+        # ใช้ os.path.join เพื่อให้เส้นทางไฟล์ทำงานได้กับทุกระบบปฏิบัติการ
+        file_path = os.path.join('./', f'{self.day}.txt')
+        if not os.path.exists(file_path) or os.stat(file_path).st_size == 0:
+            await interaction.response.send_message(embed=nextcord.Embed(description='สินค้าหมด แจ้งแอดมินเติม', color=nextcord.Color.red()))
+            return
+        
+        userJSON = json.load(open('./database/users.json', 'r', encoding='utf-8'))
+        if (str(interaction.user.id) not in userJSON):
+            embed = nextcord.Embed(description='เติมเงินเพื่อเปิดบัญชี', color=nextcord.Color.red())
+        else:
+            if (userJSON[str(interaction.user.id)]['point'] >= self.roleData['price']):
+                userJSON[str(interaction.user.id)]['point'] -= self.roleData['price']
+                userJSON[str(interaction.user.id)]['transaction'].append({
+                    "payment": {
+                        "product": self.roleData['name'],
+                        "time": str(datetime.datetime.now())
+                    }
+                })
+                json.dump(userJSON, open('./database/users.json', 'w', encoding='utf-8'), indent=4, ensure_ascii=False)
+            
+                role = nextcord.utils.get(interaction.user.guild.roles, id = self.roleData['roleId'])
+                try:
+                    await interaction.user.add_roles(role)
+                except Exception as error:
+                    print(f'FAIL TO ADD ROLE TO {interaction.user} - {str(error)}')
+                topupLogEmbed = nextcord.Embed(
+                    title='ซื้อคีย์สำเร็จโปรดเช็คDm',
+                    description=f'''
+    👩🏻 ผู้ใช้ : <@{interaction.user.id}>
+    💸 ราคา : {self.roleData['price']}
+    🎇 ได้ทำการซื้อ : {self.roleData['name']}
+    👉 คุณสามารถดาวโหลดได้ที่: <#1145222034608099368>
+    ''',
+                    color=nextcord.Color.green()
+                )
+                if (interaction.user.avatar):
+                    topupLogEmbed.set_thumbnail(url=interaction.user.avatar.url)
+                try:
+                    await bot.get_channel(config['topuplog']).send(embed=topupLogEmbed)
+                except:
+                    print('FAIL TO SEND MESSAGE TOPUP LOG')
+                key = open(f"./{self.day}.txt", "r").read().split('\n', 1)[0]
+                x = open(f"./{self.day}.txt", "r").readlines()
+                f = open(f"./{self.day}.txt", "w")
+                for line in x:
+                    if line.strip("\n") != key:
+                        f.write(line)
+                channelDM = await interaction.user.create_dm()
+              
+
+                if (channelDM):
+                    await channelDM.send(embed=nextcord.Embed(description=f"คีย์ที่คุณซื้อมาคือ {key}",color=0x00ff00))
+                    
+                embed = nextcord.Embed(description='ซื้อคีย์สำเร็จ', color=nextcord.Color.green())
+            else:
+                embed = nextcord.Embed(description=f'เงินของท่านไม่เพียงพอ ขาดอีก ({self.roleData["price"] - userJSON[str(interaction.user.id)]["point"]})', color=nextcord.Color.red())
+        await interaction.response.edit_message(embed=embed, view=None)
+
+    @nextcord.ui.button(
+        label='[🔴] ยกเลิก',
+        custom_id='cancel',
+        style=nextcord.ButtonStyle.red,
+        row=1
+    )
+    async def cancel(self, button: nextcord.Button, interaction: nextcord.Interaction):
+        return await interaction.response.edit_message(content='ยกเลิกสำเร็จ',embed=None, view=None)
+class LeaderboardView(nextcord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)  # timeout=None หมายถึง view ไม่หมดอายุ
+
+class roleSelect(nextcord.ui.Select):
+
+    def __init__(self):
+        options = []
+        i = 0
+        for role in config['roleSettings']:
+            options.append(nextcord.SelectOption(
+                value=str(role['name']).replace('คีย์ ', '').replace(' วัน', ''),
+                label=str(role['name']),
+                description=str(role['description']),
+                emoji=role['emoji']
+            ))
+            i += 1
+        
+        super().__init__(custom_id='roleSelect', placeholder='💸 เลือกคีย์ที่ต้องการซื้อ', min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: nextcord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        for role in config['roleSettings']:
+            if role['name'].replace('คีย์ ', '').replace(' วัน', '') == self.values[0]:
+                embed = nextcord.Embed()
+                embed.description = f'''
+**คุณแน่ใจหรือไม่ที่จะซื้อ** {role['name']}
+'''
+                return await interaction.send(embed=embed, view=sellroleView(roleData=role,day=self.values[0]), ephemeral=True)
+
+class topupModal(nextcord.ui.Modal):
+ 
+    def __init__(self):
+        super().__init__(title='เติมเงิน', timeout=None, custom_id='topup-modal')
+        self.link = nextcord.ui.TextInput(
+            label = 'ลิ้งค์ซองอังเปา',
+            placeholder = 'https://gift.truemoney.com/campaign/?v=xxxxxxxxxxxxxxx',
+            style = nextcord.TextInputStyle.short,
+            required = True
+        )
+        self.add_item(self.link)
+
+    async def callback(self, interaction: nextcord.Interaction):
+        link = str(self.link.value).replace(' ', '')
+        message = await interaction.response.send_message(content='checking.', ephemeral=True)
+        if re.match(r'https:\/\/gift\.truemoney\.com\/campaign\/\?v=+[a-zA-Z0-9]{18}', link):
+            voucher_hash = link.split('?v=')[1]
+            response = httpx.post(
+                url = f'https://gift.truemoney.com/campaign/vouchers/{voucher_hash}/redeem',
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/8a0.0.3987.149 Safari/537.36'
+                },
+                json = {
+                    'mobile': config['phoneNumber'],
+                    'voucher_hash': f'{voucher_hash}'
+                },
+                verify=certifi.where(),
+            )
+            if response.status_code == 200 and response.json()['status']['code'] == 'SUCCESS':
+                data = response.json()
+                amount = int(float(data['data']['my_ticket']['amount_baht']))
+                userJSON = json.load(open('./database/users.json', 'r', encoding='utf-8'))
+                if (str(interaction.user.id) not in userJSON):
+                    userJSON[str(interaction.user.id)] = {
+                        "userId": interaction.user.id,
+                        "point": amount,
+                        "all-point": amount,
+                        "transaction": [
+                            {
+                                "topup": {
+                                    "url": link,
+                                    "amount": amount,
+                                    "time": str(datetime.datetime.now())
+                                }
+                            }
+                        ]
+                    }
+                else:
+                    userJSON[str(interaction.user.id)]['point'] += amount
+                    userJSON[str(interaction.user.id)]['all-point'] += amount
+                    userJSON[str(interaction.user.id)]['transaction'].append({
+                        "topup": {
+                            "url": link,
+                            "amount": amount,
+                            "time": str(datetime.datetime.now())
+                        }
+                    })
+                json.dump(userJSON, open('./database/users.json', 'w', encoding='utf-8'), indent=4, ensure_ascii=False)
+                embed = nextcord.Embed(description='เติมเงินสำเร็จ', color=nextcord.Color.green())
+            else:
+                embed = nextcord.Embed(description='เติมเงินไม่สำเร็จ', color=nextcord.Color.red())
+        else:
+            embed = nextcord.Embed(description='รูปแบบลิ้งค์ไม่ถูกต้อง', color=nextcord.Color.red())
+        await message.edit(content=None,embed=embed)
+        
+
+
+class StockCheckView(View):
+    def __init__(self):
+        super().__init__()
+        self.add_item(StockCheckSelect())  # เพิ่ม Dropdown ใน View
+
+   
+class topupView(nextcord.ui.View):
+
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(roleSelect())
+    
+    @nextcord.ui.button(label='[💸] เติมเงิน', style=nextcord.ButtonStyle.green, custom_id='topup_button')
+    async def topup_button_callback(self, button: nextcord.ui.Button, interaction: nextcord.Interaction):
+        # This line sends the modal to the user
+        await interaction.response.send_modal(topupModal())
+
+    @nextcord.ui.button(
+        label='[💳] เช็คเงิน',
+        custom_id='balance',
+        style=nextcord.ButtonStyle.green,
+        row=1
+    )
+
+
+
+
+    
+    async def balance(self, button: nextcord.Button, interaction: nextcord.Interaction):
+        userJSON = json.load(open('./database/users.json', 'r', encoding='utf-8'))
+        if (str(interaction.user.id) not in userJSON):
+            embed = nextcord.Embed(description='เติมเงินเพื่อเปิดบัญชี', color=nextcord.Color.red())
+        else:
+            embed = nextcord.Embed(description=f'ยอดเงินคงเหลือ {userJSON[str(interaction.user.id)]["point"]}', color=nextcord.Color.green())
+        return await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+    @nextcord.ui.button(
+        label='[🏦] เติมเงินQRCODE',
+        custom_id='tanakan',
+        style=nextcord.ButtonStyle.red,
+        row=1
+    )
+    async def tanakan(self, button: nextcord.Button, interaction: nextcord.Interaction):
+        embed = nextcord.Embed(description='QRCODE สำหรับเติมเงิน เติมเสร็จแล้วให้<#1206966906511298570>หาแอดมิน ', color=nextcord.Color.red())
+        embed.set_image(url='https://cdn.discordapp.com/attachments/1167689456619368458/1206973034272133210/1707835170080.png?ex=65ddf43b&is=65cb7f3b&hm=4253c026bcc00a28140138a83ccbb7febb4f7ddeb22ebf5131aeae883836c288&')
+        return await interaction.response.send_message(embed=embed, ephemeral=True)
+  
+  
+  
+    @nextcord.ui.button(label="Check Stock", style=nextcord.ButtonStyle.green)
+    async def prompt_stock_check(self, button: Button, interaction: nextcord.Interaction):
+        # ส่งข้อความใหม่พร้อม Dropdown เพื่อให้ผู้ใช้เลือกไฟล์สต็อก
+        await interaction.response.send_message("กรุณาเลือกไฟล์สต็อกที่ต้องการเช็ค:", view=StockCheckView(), ephemeral=True)
+
+
+
+   # @nextcord.ui.button(label="อันดับการเติมเงิน", style=nextcord.ButtonStyle.green, custom_id="อันดับการเติมเงิน")
+    @nextcord.ui.button(label="อันดับการเติมเงิน", style=nextcord.ButtonStyle.green, custom_id="top_donors_button")
+    async def check_top_donors(self, button: nextcord.ui.Button, interaction: nextcord.Interaction):
+        top_donors = get_top_donors()
+        message = "🏆 **Top Donors** 🏆\n"
+        for index, (user_id, data) in enumerate(top_donors, start=1):
+            message += f"**Rank {index}**: <@{user_id}> with {data['all-point']} points\n"
+        await interaction.response.send_message(message, ephemeral=True)
+    
+   
+    @nextcord.ui.button(label="เช็คจำนวนผู้ซื้อ", style=nextcord.ButtonStyle.green, custom_id="check_buyers")
+    async def check_buyers(self, button: Button, interaction: nextcord.Interaction):
+        buyer_count = count_buyers()
+        await interaction.response.send_message(f"มีผู้ซื้อไปแล้ว {buyer_count} คน", ephemeral=True)
+
+@bot.command()
+async def show_buyers(ctx):
+    view = BuyerCountView()
+    await ctx.send("กดปุ่มด้านล่างเพื่อเช็คจำนวนผู้ซื้อ", view=view)
+
+@bot.command()
+async def show_buyer_count(ctx):
+    """คำสั่งสำหรับแสดง View ที่มีปุ่มเช็คจำนวนผู้ซื้อ"""
+    view = BuyerCountView()
+    await ctx.send("กดปุ่มด้านล่างเพื่อเช็คจำนวนผู้ซื้อ", view=view)
+
+
+
+@bot.command()
+async def show_leaderboard(ctx):
+    """คำสั่งสำหรับแสดงปุ่มเช็ค Top Donator"""
+    view = LeaderboardView()
+    await ctx.send("กดปุ่มด้านล่างเพื่อเช็คผู้ที่เติมเงินมากที่สุด", view=view)
+
+@bot.command()
+async def checkstock(ctx):
+    view = StockCheckView()
+    await ctx.send("กดปุ่ม 'Check Stock' เพื่อเริ่มการเช็คสต็อก:", view=view)
+    
+
+    
+
+@bot.event
+async def on_ready():
+    bot.add_view(topupView())
+    print(f'LOGIN AS {bot.user}')
+    print(f"")
+
+@bot.slash_command(name='setup', description='setup', guild_ids=[config['serverId']])
+async def setup(interaction: nextcord.Interaction):
+    if (interaction.user.id not in config['ownerIds']):
+        return await interaction.response.send_message(content='มึงไม่มีสิทธิ', ephemeral=True)
+    embed = nextcord.Embed()
+    embed.description = f'''
+🧧 เลือกคีย์ที่ต้องการซื้อ 🧧
+
+> รายระเอียดราคาคีย์สามารถดูได้ที่ช่องด้านล่างนี้เลย
+'''
+    embed.set_image(url='https://cdn.discordapp.com/attachments/970624157966540851/1030754839602397264/unknown_3.jpg')
+    embed.color = nextcord.Color.green()
+    await interaction.channel.send(embed=embed, view=topupView())
+    await interaction.response.send_message(content='success', ephemeral=True)
+
+class AddStock(nextcord.ui.Modal):
+    def __init__(self):
+        super().__init__("เพิ่มคีย์")
+        self.day = nextcord.ui.TextInput(
+            label="วัน",
+            required=True,
+            style=nextcord.TextInputStyle.short
+        )
+        self.key = nextcord.ui.TextInput(
+            label="คีย์",
+            required=True,
+            style=nextcord.TextInputStyle.paragraph
+        )
+        self.add_item(self.day)
+        self.add_item(self.key)
+    async def callback(self, interaction: nextcord.Interaction):
+        f = open(f'./{self.day.value}.txt','a')
+        key = self.key.value
+        if key in open(f'./{self.day.value}.txt','r').read():
+            await interaction.response.send_message(embed=nextcord.Embed(description=f"มีคีย์ `{key}` อยู่ใน database แล้ว!",color=0xff0000),ephemeral=True)
+        else:
+            if len(open(f'./{self.day.value}.txt','r').readlines()) == 0:
+                f.write(key)
+                await interaction.response.send_message(embed=nextcord.Embed(description=f"เขียนคีย์ `{key}` ลง database แล้ว!",color=0x00ff00),ephemeral=True)
+            else:
+                f.write('\n')
+                f.write(key)
+                await interaction.response.send_message(embed=nextcord.Embed(description=f"เขียนคีย์ `{key}` ลง database แล้ว!",color=0x00ff00),ephemeral=True)
+
+class RemoveStock(nextcord.ui.Modal):
+    def __init__(self):
+        super().__init__("ลบคีย์")
+        self.day = nextcord.ui.TextInput(
+            label="วัน",
+            required=True,
+            style=nextcord.TextInputStyle.short
+        )
+        self.key = nextcord.ui.TextInput(
+            label="คีย์",
+            required=True,
+            style=nextcord.TextInputStyle.paragraph
+        )
+        self.add_item(self.day)
+        self.add_item(self.key)
+    async def callback(self, interaction: nextcord.Interaction):
+        f = open(f'./{self.day.value}.txt','a')
+        key = self.key.value
+        if key not in open(f'./{self.day.value}.txt','r').read():
+            await interaction.send(embed=nextcord.Embed(description=f"ไม่มีคีย์ `{key}` อยู่ใน database!",color=0xff0000),ephemeral=True)
+        else:
+            lines = open(f"./{self.day.value}.txt", "r").readlines()
+            f = open(f"./{self.day.value}.txt", "w")
+            for line in lines:
+                if line.strip("\n") != key:
+                    f.write(line)
+            await interaction.send(embed=nextcord.Embed(description=f"ลบคีย์ `{key}` ออกจาก database แล้ว!",color=0x00ff00),ephemeral=True)
+
+@bot.slash_command(name='add-stock', description='add stock', guild_ids=[config['serverId']])
+async def addStock(interaction: nextcord.Interaction):
+    if (interaction.user.id not in config['ownerIds']):
+        return await interaction.response.send_message(content='No Permiss', ephemeral=True)
+    await interaction.response.send_modal(AddStock())
+
+@bot.slash_command(name='remove-stock', description='remove stock', guild_ids=[config['serverId']])
+async def removeStock(interaction: nextcord.Interaction):
+    if (interaction.user.id not in config['ownerIds']):
+        return await interaction.response.send_message(content='No Permiss', ephemeral=True)
+    await interaction.response.send_modal(RemoveStock())
+
+@bot.slash_command(name='add-point', description='add point', guild_ids=[config['serverId']])
+async def addPoint(interaction: nextcord.Interaction, member: nextcord.Member, amount: int):
+    if (interaction.user.id not in config['ownerIds']):
+        return await interaction.response.send_message(content='No Permiss', ephemeral=True)
+    userJSON = json.load(open('./database/users.json', 'r', encoding='utf-8'))
+    if (str(member.id) not in userJSON):
+        userJSON[str(member.id)] = {
+            "userId": member.id,
+            "point": amount,
+            "all-point": amount,
+            "transaction": [
+                {
+                    "admin-add": {
+                        "amount": amount,
+                        "time": str(datetime.datetime.now())
+                    }
+                }
+            ]
+        }
+    else:
+        userJSON[str(member.id)]['point'] += amount
+        userJSON[str(member.id)]['all-point'] += amount
+        userJSON[str(member.id)]['transaction'].append({
+            "admin-add": {
+                "amount": amount,
+                "time": str(datetime.datetime.now())
+            }
+        })
+    json.dump(userJSON, open('./database/users.json', 'w', encoding='utf-8'), indent=4, ensure_ascii=False)
+    await interaction.response.send_message(content='Success', ephemeral=True)
+
+@bot.slash_command(name='remove-point', description='remove point', guild_ids=[config['serverId']])
+async def removePoint(interaction: nextcord.Interaction, member: nextcord.Member, amount: int):
+    if (interaction.user.id not in config['ownerIds']):
+        return await interaction.response.send_message(content='No Permiss', ephemeral=True)
+    userJSON = json.load(open('./database/users.json', 'r', encoding='utf-8'))
+    if (str(member.id) not in userJSON):
+        userJSON[str(member.id)] = {
+            "userId": member.id,
+            "point": 0 - amount,
+            "all-point": 0,
+            "transaction": [
+                {
+                    "admin-remove": {
+                        "amount": amount,
+                        "time": str(datetime.datetime.now())
+                    }
+                }
+            ]
+        }
+    else:
+        userJSON[str(member.id)]['point'] -= amount
+        userJSON[str(member.id)]['transaction'].append({
+            "admin-remove": {
+                "amount": amount,
+                "time": str(datetime.datetime.now())
+            }
+        })
+    json.dump(userJSON, open('./database/users.json', 'w', encoding='utf-8'), indent=4, ensure_ascii=False)
+    await interaction.response.send_message(content='Success', ephemeral=True)
+
+bot.run(config['token'])
